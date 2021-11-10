@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"testing"
 	"time"
 
 	tfv1alpha1 "github.com/isaaguilar/terraform-operator/pkg/apis/tf/v1alpha1"
@@ -55,10 +57,8 @@ var _ = Describe("Terraform controller", func() {
 					Namespace: TerraformNamespace,
 				},
 				Spec: tfv1alpha1.TerraformSpec{
-					TerraformModule: &tfv1alpha1.SrcOpts{
-						Address: "https://github.com/cloudposse/terraform-example-module.git?ref=master",
-					},
-					ApplyOnCreate: true,
+					TerraformModule: "https://github.com/cloudposse/terraform-example-module.git?ref=master",
+					ApplyOnCreate:   true,
 				},
 			}
 			Expect(k8sClient.Create(ctx, &terraform)).Should(Succeed())
@@ -116,3 +116,127 @@ var _ = Describe("Terraform controller", func() {
 		})
 	})
 })
+
+func TestNewGitRepoAccessOptions(t *testing.T) {
+	tf := tfv1alpha1.Terraform{}
+	opts, _ := newGitRepoAccessOptionsFromSpec(&tf, "http://foobar.com", []string{})
+	fmt.Printf("%+v", opts)
+}
+
+func TestGetParsedAddress(t *testing.T) {
+	var err error
+	// _, err = getParsedAddress("foo::git::http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("git::ssh://git@github.com/user/repo//foo/bar/file?ref=12345632&sdf=http://go.com/ok")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("github.com/user/repo.git//boo/bar//bash")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("http://user:password@github.com/user/repo.git//boo/bar//bash")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("s3://tf.isaaguilar.com/index//bash?ref=a12994d&url=example.com/chke/diil")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("git@github.com:user/repo//my/favorite/file.txt?ref=12345632")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("path/to/my/local.txt")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("/my/abs/path.out")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("../../up/a/directory.tf")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("fee/fie/foe?ref=0.1.0")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("example.com/awesomecorp/consul/happycloud")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// _, err = getParsedAddress("github.com/isaaguilar/terraform-aws-multi-account-peering")
+	// if err != nil {
+	// 	t.Error(err)
+	// }
+	// scmdetecotor := scmDetector{hosts: []string{"github.com"}}
+
+	var exampleScmType scmType = "bar"
+
+	scmMap := map[string]scmType{
+		"github.com": gitScmType,
+		"foo.io":     exampleScmType,
+	}
+	_, err = getParsedAddress("github.com/hashicorp/example", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("git@github.com:hashicorp/example.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("https://github.com/hashicorp/example//path/to/a//abs/to/b//root/c?do=this&url=https://google.com/ohno/ok&ref=master", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("git::https://example.com/vpc.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("git::ssh://username@example.com/storage.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("git::username@example.com:storage.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("hg::http://example.com/vpc.hg", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("https://example.com/vpc-module.zip", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("s3::https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("gcs::https://www.googleapis.com/storage/v1/modules/foomodule.zip", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("ssh://username@example.com/storage.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("username@example.com:storage.git", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+	_, err = getParsedAddress("username@foo.io:myfavoriteuser/myfavoriterepo.goo?ref=7654321", scmMap)
+	if err != nil {
+		t.Error(err)
+	}
+
+	// fmt.Printf("%+v", parsed)
+}

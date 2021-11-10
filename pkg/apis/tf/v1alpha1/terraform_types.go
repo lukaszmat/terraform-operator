@@ -83,10 +83,19 @@ type TerraformSpec struct {
 
 	// TerraformModule is the terraform module scm address. Currently supports
 	// git protocol over SSH or HTTPS
-	TerraformModule *SrcOpts `json:"terraformModule"`
+	TerraformModule string `json:"terraformModule"`
 
-	Sources []*SrcOpts      `json:"sources,omitempty"`
-	Env     []corev1.EnvVar `json:"env,omitempty"`
+	// ResourceDownloads defines other files to download into the module
+	// directory that can be used by the terraform workflow runners.
+	// The `tfvar` type will also be fetched by the `exportRepo` option (if
+	// defined) to aggregate the set of tfvars to save to an scm system.
+	ResourceDownloads []*ResourceDownload `json:"resourceDownloads,omitempty"`
+
+	// Env is used to define a common set of environment variables into the
+	// workflow runners. The `TF_VAR_` prefix will also be used by the
+	// `exportRepo` option if the `value` is defined. The
+	// `exportRepo` option will not add `valueFrom` values.
+	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// ServiceAccount use a specific kubernetes ServiceAccount for running the create + destroy pods.
 	// If not specified we create a new ServiceAccount per Terraform
@@ -233,33 +242,30 @@ type ReconcileTerraformDeployment struct {
 	SyncPeriod int64 `json:"syncPeriod,omitempty"`
 }
 
-// Source is used to describe details of where to find configs
-type Source struct {
-	Source    *SrcOpts       `json:"source,omitempty"`
-	ConfigMap *ConfigMapOpts `json:"configMap,omitempty"`
-}
+// ResourceDownload (formerly SrcOpts) defines a resource to fetch using one
+// of the configured protocols: ssh|http|https (eg git::SSH or git::HTTPS)
+type ResourceDownload struct {
 
-// ConfigMapOpts used to define the configmap and relevant data keys
-type ConfigMapOpts struct {
-	Name string   `json:"name"`
-	Keys []string `json:"keys,omitempty"`
-}
-
-// SrcOpts defines a terraform source location (eg git::SSH or git::HTTPS)
-type SrcOpts struct {
-
-	// Address defines the source address of the tf resources. This this var
-	// will try to accept any format defined in
-	// https://www.terraform.io/docs/modules/sources.html
-	// When downloading `tfvars`, the double slash `//` syntax is used to
-	// define dir or tfvar files. This can be used multiple times for
-	// multiple items.
+	// Address defines the source address resources to fetch.
 	Address string `json:"address"`
+
+	// Path will download the resources into this path which is relative to
+	// the main module directory.
+	Path string `json:"path,omitempty"`
 
 	// Extras will allow for giving the controller specific instructions for
 	// fetching files from the address.
+	// DEPRECATION NOTICE -- extras is deprecated and will be ignored.
+	// Use `type` or `path` to configure the downloaded resources instead.
 	Extras []string `json:"extras,omitempty"`
 }
+
+type ResourceDownloadType string
+
+const (
+	DownloadDirectory ResourceDownloadType = "dir"
+	DownloadFile      ResourceDownloadType = "file"
+)
 
 // ProxyOpts configures ssh tunnel/socks5 for downloading ssh/https resources
 type ProxyOpts struct {
@@ -402,6 +408,7 @@ const (
 type PodType string
 
 const (
+	PodSetupDelete     PodType = "setup-delete"
 	PodPreInitDelete   PodType = "init0-delete"
 	PodInitDelete      PodType = "init-delete"
 	PodPostInitDelete  PodType = "init1-delete"
@@ -412,6 +419,7 @@ const (
 	PodApplyDelete     PodType = "apply-delete"
 	PodPostApplyDelete PodType = "post-delete"
 
+	PodSetup     PodType = "setup"
 	PodPreInit   PodType = "init0"
 	PodInit      PodType = "init"
 	PodPostInit  PodType = "init1"
