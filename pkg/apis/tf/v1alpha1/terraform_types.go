@@ -253,6 +253,10 @@ type ResourceDownload struct {
 	// the main module directory.
 	Path string `json:"path,omitempty"`
 
+	// UseAsVar will add the file as a tfvar via the -var-file flag of the
+	// terraform plan command. The downloaded resource must not be a directory.
+	UseAsVar bool `json:"useAsVar,omitempty"`
+
 	// Extras will allow for giving the controller specific instructions for
 	// fetching files from the address.
 	// DEPRECATION NOTICE -- extras is deprecated and will be ignored.

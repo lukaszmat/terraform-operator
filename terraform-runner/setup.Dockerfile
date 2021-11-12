@@ -1,6 +1,6 @@
 FROM alpine/git:user
 USER root
-RUN apk add gettext jq
+RUN apk add gettext jq bash
 COPY backend.tf /backend.tf
 COPY setup.sh /runner/tfo_runner.sh
 

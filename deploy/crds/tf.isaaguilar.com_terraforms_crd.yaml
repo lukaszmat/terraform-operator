@@ -337,6 +337,11 @@ spec:
                     description: Path will download the resources into this path which
                       is relative to the main module directory.
                     type: string
+                  useAsVar:
+                    description: UseAsVar will add the file as a tfvar via the -var-file
+                      flag of the terraform plan command. The downloaded resource
+                      must not be a directory.
+                    type: boolean
                 required:
                 - address
                 type: object

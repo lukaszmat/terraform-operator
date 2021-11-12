@@ -31,7 +31,6 @@ import (
 	"github.com/isaaguilar/terraform-operator/pkg/gitclient"
 	"github.com/isaaguilar/terraform-operator/pkg/utils"
 	localcache "github.com/patrickmn/go-cache"
-	giturl "github.com/whilp/git-urls"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/proxy"
 	gitTransportClient "gopkg.in/src-d/go-git.v4/plumbing/transport/client"
@@ -106,16 +105,44 @@ type ReconcileTerraform struct {
 }
 
 type ParsedAddress struct {
-	Detect    string   `json:"detect"`
-	Sourcedir string   `json:"sourcedir"`
-	Subdirs   []string `json:"subdirs"`
-	Hash      string   `json:"hash"`
-	Protocol  string   `json:"protocol"`
-	Uri       string   `json:"uri"`
-	Host      string   `json:"host"`
-	Port      string   `json:"post"`
-	User      string   `json:"user"`
-	Repo      string   `json:"repo"`
+	// DetectedScheme is the name of the bin or protocol to use to fetch. For
+	// example, git will be used to fetch git repos (over https or ssh
+	// "protocol").
+	DetectedScheme string `json:"detect"`
+
+	// Path the target path for the downloaded file or directory
+	Path string `json:"path"`
+
+	UseAsVar bool `json:"useAsVar"`
+
+	// Url is the raw address + query
+	Url string `json:"url"`
+
+	// Files are the files to find with a repo.
+	Files []string `json:"files"`
+
+	// Hash is also known as the `ref` query argument. For git this is the
+	// commit-sha or branch-name to checkout.
+	Hash string `json:"hash"`
+
+	// UrlScheme is the protocol of the URL
+	UrlScheme string `json:"protocol"`
+
+	// Uri is the path of the URL after the proto://host.
+	Uri string `json:"uri"`
+
+	// Host is the host of the URL.
+	Host string `json:"host"`
+
+	// Port is the port to use when fetching the URL.
+	Port string `json:"port"`
+
+	// User is the user to use when fetching the URL.
+	User string `json:"user"`
+
+	// Repo when using a SCM is the URL of the repo which is the same as the
+	// URL and omitting the query args.
+	Repo string `json:"repo"`
 }
 
 type GitRepoAccessOptions struct {
@@ -161,15 +188,15 @@ func newRunOptions(tf *tfv1alpha1.Terraform) RunOptions {
 	// applyAction := false
 	name := tf.Status.PodNamePrefix
 	versionedName := name + "-v" + fmt.Sprint(tf.Generation)
-	terraformRunner := "isaaguilar/tf-runner-alphav4"
+	terraformRunner := "isaaguilar/tf-runner-v5alpha1"
 	terraformRunnerPullPolicy := corev1.PullIfNotPresent
-	terraformVersion := "1.0.2"
+	terraformVersion := "1.0.11"
 
-	scriptRunner := "isaaguilar/script-runner-alphav4"
+	scriptRunner := "isaaguilar/script-runner"
 	scriptRunnerPullPolicy := corev1.PullIfNotPresent
 	scriptRunnerVersion := "1.0.0"
 
-	setupRunner := "isaaguilar/setup-runner-alphav5"
+	setupRunner := "isaaguilar/setup-runner"
 	setupRunnerPullPolicy := corev1.PullIfNotPresent
 	setupRunnerVersion := "1.0.0"
 
@@ -953,7 +980,7 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1alpha1.Ter
 		// ConfigMap Data only needs to be updated when generation changes
 		for _, s := range tf.Spec.ResourceDownloads {
 			address := strings.TrimSpace(s.Address)
-			parsedAddress, err := getParsedAddress(address, scmMap)
+			parsedAddress, err := getParsedAddress(address, s.Path, s.UseAsVar, scmMap)
 			if err != nil {
 				return err
 			}
@@ -1901,8 +1928,8 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 	// if r.token != "" {
 
 	// }
-	if len(r.stack.Subdirs) > 0 {
-		value := r.stack.Subdirs[0]
+	if len(r.stack.Files) > 0 {
+		value := r.stack.Files[0]
 		if value == "" {
 			value = "."
 		}
@@ -2502,7 +2529,7 @@ func newGitRepoAccessOptionsFromSpec(tf *tfv1alpha1.Terraform, address string, e
 			scmMap[v.Host] = gitScmType
 		}
 	}
-	d.ParsedAddress, err = getParsedAddress(d.Address, scmMap)
+	d.ParsedAddress, err = getParsedAddress(d.Address, "", false, scmMap)
 	if err != nil {
 		return d, fmt.Errorf("Error in parsing address: %v", err)
 	}
@@ -2563,7 +2590,7 @@ func (d GitRepoAccessOptions) tfvarFiles() (string, error) {
 
 	// TODO Should path definitions walk the path?
 	if utils.ListContainsStr(d.Extras, "is-file") {
-		for _, filename := range d.Subdirs {
+		for _, filename := range d.Files {
 			if !strings.HasSuffix(filename, ".tfvars") {
 				continue
 			}
@@ -2574,8 +2601,8 @@ func (d GitRepoAccessOptions) tfvarFiles() (string, error) {
 			}
 			tfvars += string(content) + "\n"
 		}
-	} else if len(d.Subdirs) > 0 {
-		for _, s := range d.Subdirs {
+	} else if len(d.Files) > 0 {
+		for _, s := range d.Files {
 			subdir := filepath.Join(d.Directory, s)
 			lsdir, err := ioutil.ReadDir(subdir)
 			if err != nil {
@@ -2625,7 +2652,7 @@ func (d GitRepoAccessOptions) otherConfigFiles() (map[string]string, error) {
 
 	// TODO Should path definitions walk the path?
 	if utils.ListContainsStr(d.Extras, "is-file") {
-		for _, filename := range d.Subdirs {
+		for _, filename := range d.Files {
 			file := filepath.Join(d.Directory, filename)
 			content, err := ioutil.ReadFile(file)
 			if err != nil {
@@ -2633,8 +2660,8 @@ func (d GitRepoAccessOptions) otherConfigFiles() (map[string]string, error) {
 			}
 			configFiles[filepath.Base(filename)] = string(content)
 		}
-	} else if len(d.Subdirs) > 0 {
-		for _, s := range d.Subdirs {
+	} else if len(d.Files) > 0 {
+		for _, s := range d.Files {
 			subdir := filepath.Join(d.Directory, s)
 			lsdir, err := ioutil.ReadDir(subdir)
 			if err != nil {
@@ -2997,8 +3024,8 @@ func (d *GitRepoAccessOptions) download(ctx context.Context, k8sclient client.Cl
 
 	var err error
 	var clientGitRepo gitclient.GitRepo
-	if d.Protocol == "ssh" {
-		filename, err := d.getGitSSHKey(ctx, k8sclient, namespace, d.Protocol, reqLogger)
+	if d.UrlScheme == "ssh" {
+		filename, err := d.getGitSSHKey(ctx, k8sclient, namespace, d.UrlScheme, reqLogger)
 		if err != nil {
 			return fmt.Errorf("Download failed for '%s': %v", d.Repo, err)
 		}
@@ -3014,7 +3041,7 @@ func (d *GitRepoAccessOptions) download(ctx context.Context, k8sclient client.Cl
 	} else {
 		// TODO find out and support any other protocols
 		// Just assume http is the only other protocol for now
-		token, err := d.getGitToken(ctx, k8sclient, namespace, d.Protocol, reqLogger)
+		token, err := d.getGitToken(ctx, k8sclient, namespace, d.UrlScheme, reqLogger)
 		if err != nil {
 			// Maybe we don't need to exit if no creds are used here
 			reqLogger.Info(fmt.Sprintf("%v", err))
@@ -3173,46 +3200,7 @@ func getForcedGetter(src string) (string, string) {
 	return forced, src
 }
 
-type scmDetector struct {
-	hosts []string
-}
-
-func (d scmDetector) Detect(src, _ string) (string, bool, error) {
-
-	matched := sshPattern.FindStringSubmatch(src)
-	if matched == nil {
-		return "", false, nil
-	}
-
-	user := matched[1]
-	host := matched[2]
-	path := matched[3]
-	qidx := strings.Index(path, "?")
-	if qidx == -1 {
-		qidx = len(path)
-	}
-
-	var u url.URL
-	u.Scheme = "ssh"
-	u.User = url.User(user)
-	u.Host = host
-	u.Path = path[0:qidx]
-	if qidx < len(path) {
-		q, err := url.ParseQuery(path[qidx+1:])
-		if err != nil {
-			return "", false, fmt.Errorf("error parsing GitHub SSH URL: %s", err)
-		}
-		u.RawQuery = q.Encode()
-	}
-
-	if !utils.ListContainsStr(d.hosts, u.Host) {
-		return "", false, nil
-	}
-
-	// return u.String(), true, nil
-	return "git::" + u.String(), true, nil
-
-}
+var sshPattern = regexp.MustCompile("^(?:([^@]+)@)?([^:]+):/?(.+)$")
 
 type sshDetector struct{}
 
@@ -3246,98 +3234,12 @@ func (s *sshDetector) Detect(src, _ string) (string, bool, error) {
 	return u.String(), true, nil
 }
 
-type gh struct{}
-
-func (g *gh) Detect(src, _ string) (string, bool, error) {
-	if len(src) == 0 {
-		return "", false, nil
-	}
-
-	if strings.HasPrefix(src, "github.com/") {
-		return g.detectHTTP(src)
-	}
-
-	return "", false, nil
-	// return "http://example.com", true, nil
-}
-
-func (d *gh) detectHTTP(src string) (string, bool, error) {
-	parts := strings.Split(src, "/")
-	if len(parts) < 3 {
-		return "", false, fmt.Errorf(
-			"GitHub URLs should be github.com/username/repo")
-	}
-
-	urlStr := fmt.Sprintf("https://%s", strings.Join(parts[:3], "/"))
-	url, err := url.Parse(urlStr)
-	if err != nil {
-		return "", true, fmt.Errorf("error parsing GitHub URL: %s", err)
-	}
-
-	if !strings.HasSuffix(url.Path, ".git") {
-		url.Path += ".git"
-	}
-
-	if len(parts) > 3 {
-		url.Path += "//" + strings.Join(parts[3:], "/")
-	}
-
-	return "git::" + url.String(), true, nil
-}
-
-var sshPattern = regexp.MustCompile("^(?:([^@]+)@)?([^:]+):/?(.+)$")
-
 type scmType string
 
 var gitScmType scmType = "git"
 
-func getParsedAddress(address string, scmMap map[string]scmType) (ParsedAddress, error) {
-	// fmt.Println("")
-	// fmt.Println("")
-	// fmt.Println("address:", address)
-	// sourcedir, subdirstr := getter.SourceDirSubdir(address)
-	// fmt.Printf("srcdir1: %+v\n", sourcedir)
-
-	// fmt.Println("result:", result)
-	// fmt.Println("forcedDetect:", forcedDetect)
-
-	// ds := []getter.Detector{
-	// 	new(gh),
-	// }
-
-	// _ = ds
-
-	// matched := sshPattern.FindStringSubmatch(sourcedir)
-	// if matched != nil {
-	// 	user := matched[1]
-	// 	host := matched[2]
-	// 	path := matched[3]
-	// 	qidx := strings.Index(path, "?")
-	// 	if qidx == -1 {
-	// 		qidx = len(path)
-	// 	}
-
-	// 	var u url.URL
-	// 	u.Scheme = "ssh"
-	// 	u.User = url.User(user)
-	// 	u.Host = host
-	// 	u.Path = path[0:qidx]
-	// 	if qidx < len(path) {
-	// 		q, err := url.ParseQuery(path[qidx+1:])
-	// 		if err != nil {
-	// 			return ParsedAddress{}, fmt.Errorf("error parsing GitHub SSH URL: %s", err)
-	// 		}
-	// 		u.RawQuery = q.Encode()
-	// 	}
-
-	// 	j, _ := json.MarshalIndent(u, "", "  ")
-	// 	fmt.Printf("matched: %s\n", j)
-
-	// } else {
-	// 	fmt.Printf("matched: %+v\n", matched)
-	// }
+func getParsedAddress(address, path string, useAsVar bool, scmMap map[string]scmType) (ParsedAddress, error) {
 	detectors := []getter.Detector{
-		// new(gh),
 		new(sshDetector),
 	}
 
@@ -3349,23 +3251,19 @@ func getParsedAddress(address string, scmMap map[string]scmType) (ParsedAddress,
 	}
 
 	forcedDetect, result := getForcedGetter(output)
-	sourcedir, subdirstr := getter.SourceDirSubdir(result)
+	urlSource, filesSource := getter.SourceDirSubdir(result)
 
-	// sourcedir, subdirstr = getter.SourceDirSubdir(output)
-	// fmt.Printf("srcdir2: %+v\n", sourcedir)
-	// fmt.Printf("detect1: %+v\n", output)
-	// 	if err != nil {
-	// 		return fmt.Errorf("Could not Detect source: %v", err)
-	// 	}
-
-	x, err := url.Parse(sourcedir)
+	parsedURL, err := url.Parse(urlSource)
 	if err != nil {
 		return ParsedAddress{}, err
 	}
+
+	scheme := parsedURL.Scheme
+
 	// TODO URL parse rules: github.com should check the url is 'host/user/repo'
 	// Currently the below is just a host check which isn't 100% correct
-	if utils.ListContainsStr([]string{"github.com"}, x.Host) {
-		x.Scheme = "git"
+	if utils.ListContainsStr([]string{"github.com"}, parsedURL.Host) {
+		scheme = "git"
 	}
 
 	// Check scm configuration for hosts and what scheme to map them as
@@ -3377,97 +3275,52 @@ func getParsedAddress(address string, scmMap map[string]scmType) (ParsedAddress,
 	for host, _ := range scmMap {
 		hosts = append(hosts, host)
 	}
-	if utils.ListContainsStr(hosts, x.Host) {
-		x.Scheme = string(scmMap[x.Host])
+	if utils.ListContainsStr(hosts, parsedURL.Host) {
+		scheme = string(scmMap[parsedURL.Host])
 	}
 
 	// forceDetect shall override all other schemes
 	if forcedDetect != "" {
-		x.Scheme = forcedDetect
+		scheme = forcedDetect
 	}
 
-	// fmt.Println("scheme:", x.Scheme)
-	// fmt.Println("url:", sourcedir)
-	// fmt.Println("user(name):", x.User.Username())
-	// fmt.Println("query:", x.RawQuery)
-
-	// xjson, err := json.MarshalIndent(x, "", " ")
-	// if err != nil {
-	// 	return ParsedAddress{}, err
-	// }
-	// fmt.Println("urlParse:", string(xjson))
-	// fmt.Printf("parser1: %+v\n", x.Host)
-	y, err := url.ParseQuery(x.RawQuery)
+	y, err := url.ParseQuery(parsedURL.RawQuery)
 	if err != nil {
 		return ParsedAddress{}, err
 	}
 	hash := y.Get("ref")
-	// fmt.Printf("queryarg: %+v\n", y)
-	// fmt.Println()
 
 	// subdir can contain a list seperated by double slashes
-	subdirs := strings.Split(subdirstr, "//")
-
-	// var hash string
-	// if strings.Contains(sourcedir, "?") {
-	// 	for i, v := range strings.Split(sourcedir, "?") {
-	// 		if i > 0 {
-	// 			if strings.Contains(v, "&") {
-	// 				for _, w := range strings.Split(v, "&") {
-	// 					if strings.Contains(w, "ref=") {
-	// 						hash = strings.Split(w, "ref=")[1]
-	// 					}
-	// 				}
-
-	// 			} else if strings.Contains(v, "ref=") {
-	// 				hash = strings.Split(v, "ref=")[1]
-	// 			}
-	// 		}
-
-	// 	}
-	// }
-
-	src := strings.TrimPrefix(sourcedir, "git::")
-
-	// strip out the url args
-	repo := strings.Split(src, "?")[0]
-	u, err := giturl.Parse(repo)
-	if err != nil {
-		return ParsedAddress{}, fmt.Errorf("unable to parse giturl: %v", err)
+	files := strings.Split(filesSource, "//")
+	if len(files) == 1 && files[0] == "" {
+		files = []string{"."}
 	}
-	protocol := u.Scheme
-	uri := strings.Split(u.RequestURI(), "?")[0]
-	host := u.Host
-	port := u.Port()
+
+	// Assign default ports for common protos
+	port := parsedURL.Port()
 	if port == "" {
-		if protocol == "ssh" {
+		if parsedURL.Scheme == "ssh" {
 			port = "22"
-		} else if protocol == "https" {
+		} else if parsedURL.Scheme == "https" {
 			port = "443"
 		}
 	}
 
-	user := u.User.Username()
-	if user == "" {
-		user = "git"
-	}
-
 	p := ParsedAddress{
-		Detect:    x.Scheme,
-		Sourcedir: sourcedir,
-		Subdirs:   subdirs,
-		Hash:      hash,
-		Protocol:  protocol,
-		Uri:       uri,
-		Host:      host,
-		Port:      port,
-		User:      user,
-		Repo:      repo,
+		DetectedScheme: scheme,
+		Path:           path,
+		UseAsVar:       useAsVar,
+		Url:            parsedURL.String(),
+		Files:          files,
+		Hash:           hash,
+		UrlScheme:      parsedURL.Scheme,
+		Host:           parsedURL.Host,
+		Uri:            strings.Split(parsedURL.RequestURI(), "?")[0],
+		Port:           port,
+		User:           parsedURL.User.Username(),
+		Repo:           strings.Split(parsedURL.String(), "?")[0],
 	}
-
-	// fmt.Printf("%+v", p)
 	return p, nil
-
 }
 
 func (d GitRepoAccessOptions) getProxyAuthMethod(ctx context.Context, k8sclient client.Client, namespace string) (ssh.AuthMethod, error) {
@@ -3554,13 +3407,13 @@ func (d GitRepoAccessOptions) commitTfvars(ctx context.Context, k8sclient client
 
 	reqLogger.V(1).Info("Setting up download options for export")
 	if (tfv1alpha1.ProxyOpts{}) != d.SSHProxy {
-		if strings.Contains(d.Protocol, "http") {
+		if strings.Contains(d.UrlScheme, "http") {
 			err := d.startHTTPSProxy(ctx, k8sclient, namespace, reqLogger)
 			if err != nil {
 				reqLogger.Error(err, "failed to start ssh proxy")
 				return
 			}
-		} else if d.Protocol == "ssh" {
+		} else if d.UrlScheme == "ssh" {
 			err := d.startSSHProxy(ctx, k8sclient, namespace, reqLogger)
 			if err != nil {
 				reqLogger.Error(err, "failed to start ssh proxy")

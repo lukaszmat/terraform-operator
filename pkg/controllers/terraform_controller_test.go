@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -125,118 +126,157 @@ func TestNewGitRepoAccessOptions(t *testing.T) {
 
 func TestGetParsedAddress(t *testing.T) {
 	var err error
-	// _, err = getParsedAddress("foo::git::http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
+	// p, err = getParsedAddress("foo::git::http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("git::ssh://git@github.com/user/repo//foo/bar/file?ref=12345632&sdf=http://go.com/ok")
+	// p, err = getParsedAddress("git::ssh://git@github.com/user/repo//foo/bar/file?ref=12345632&sdf=http://go.com/ok")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
+	// p, err = getParsedAddress("http://foobar.com//boo/bar//bash?ref=a12994d&url=example.com/chke/diil")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("github.com/user/repo.git//boo/bar//bash")
+	// p, err = getParsedAddress("github.com/user/repo.git//boo/bar//bash")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("http://user:password@github.com/user/repo.git//boo/bar//bash")
+	// p, err = getParsedAddress("http://user:password@github.com/user/repo.git//boo/bar//bash")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("s3://tf.isaaguilar.com/index//bash?ref=a12994d&url=example.com/chke/diil")
+	// p, err = getParsedAddress("s3://tf.isaaguilar.com/index//bash?ref=a12994d&url=example.com/chke/diil")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("git@github.com:user/repo//my/favorite/file.txt?ref=12345632")
+	// p, err = getParsedAddress("git@github.com:user/repo//my/favorite/file.txt?ref=12345632")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("path/to/my/local.txt")
+	// p, err = getParsedAddress("path/to/my/local.txt")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("/my/abs/path.out")
+	// p, err = getParsedAddress("/my/abs/path.out")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("../../up/a/directory.tf")
+	// p, err = getParsedAddress("../../up/a/directory.tf")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("fee/fie/foe?ref=0.1.0")
+	// p, err = getParsedAddress("fee/fie/foe?ref=0.1.0")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("example.com/awesomecorp/consul/happycloud")
+	// p, err = getParsedAddress("example.com/awesomecorp/consul/happycloud")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
-	// _, err = getParsedAddress("github.com/isaaguilar/terraform-aws-multi-account-peering")
+	// p, err = getParsedAddress("github.com/isaaguilar/terraform-aws-multi-account-peering")
 	// if err != nil {
 	// 	t.Error(err)
 	// }
 	// scmdetecotor := scmDetector{hosts: []string{"github.com"}}
-
+	var b []byte
+	var p ParsedAddress
 	var exampleScmType scmType = "bar"
 
 	scmMap := map[string]scmType{
 		"github.com": gitScmType,
 		"foo.io":     exampleScmType,
 	}
-	_, err = getParsedAddress("github.com/hashicorp/example", scmMap)
+	p, err = getParsedAddress("github.com/hashicorp/example", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("git@github.com:hashicorp/example.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("git@github.com:hashicorp/example.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("https://github.com/hashicorp/example//path/to/a//abs/to/b//root/c?do=this&url=https://google.com/ohno/ok&ref=master", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("https://github.com/hashicorp/example//path/to/a//abs/to/b//root/c?do=this&url=https://google.com/ohno/ok&ref=master", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("git::https://example.com/vpc.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("git::https://example.com/vpc.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("git::ssh://username@example.com/storage.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("git::ssh://username@example.com/storage.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("git::username@example.com:storage.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("git::username@example.com:storage.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("hg::http://example.com/vpc.hg", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("hg::http://example.com/vpc.hg", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("https://example.com/vpc-module.zip", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("https://example.com/vpc-module.zip", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("s3::https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("s3::https://s3-eu-west-1.amazonaws.com/examplecorp-terraform-modules/vpc.zip", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("gcs::https://www.googleapis.com/storage/v1/modules/foomodule.zip", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("gcs::https://www.googleapis.com/storage/v1/modules/foomodule.zip", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("ssh://username@example.com/storage.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("ssh://username@example.com/storage.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("username@example.com:storage.git", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("username@example.com:storage.git", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = getParsedAddress("username@foo.io:myfavoriteuser/myfavoriterepo.goo?ref=7654321", scmMap)
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
+
+	p, err = getParsedAddress("username@foo.io:myfavoriteuser/myfavoriterepo.goo?ref=7654321", "", false, scmMap)
 	if err != nil {
 		t.Error(err)
 	}
+	b, _ = json.MarshalIndent(p, "", " ")
+	fmt.Println(string(b))
 
 	// fmt.Printf("%+v", parsed)
 }
