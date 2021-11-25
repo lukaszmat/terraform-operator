@@ -157,8 +157,17 @@ type GitRepoAccessOptions struct {
 	ParsedAddress
 }
 
+type ExportOptions struct {
+	stack       ParsedAddress
+	confPath    string
+	tfvarsPath  string
+	gitUsername string
+	gitEmail    string
+}
+
 type RunOptions struct {
 	namespace                               string
+	tfName                                  string
 	name                                    string
 	versionedName                           string
 	envVars                                 []corev1.EnvVar
@@ -181,11 +190,13 @@ type RunOptions struct {
 	setupRunnerVersion                      string
 	runnerAnnotations                       map[string]string
 	runnerRules                             []rbacv1.PolicyRule
+	exportOptions                           ExportOptions
 }
 
 func newRunOptions(tf *tfv1alpha1.Terraform) RunOptions {
 	// TODO Read the tfstate and decide IF_NEW_RESOURCE based on that
 	// applyAction := false
+	tfName := tf.Name
 	name := tf.Status.PodNamePrefix
 	versionedName := name + "-v" + fmt.Sprint(tf.Generation)
 	terraformRunner := "isaaguilar/tf-runner-v5alpha1"
@@ -244,6 +255,7 @@ func newRunOptions(tf *tfv1alpha1.Terraform) RunOptions {
 
 	return RunOptions{
 		namespace:                               tf.Namespace,
+		tfName:                                  tfName,
 		name:                                    name,
 		versionedName:                           versionedName,
 		envVars:                                 tf.Spec.Env,
@@ -292,6 +304,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	}
 	r.Cache.Set(lockKey, reconcilerID, -1)
 	defer r.Cache.Delete(lockKey)
+	defer reqLogger.V(2).Info("Request has released reconcile lock")
 	reqLogger.V(2).Info("Request has acquired reconcile lock")
 
 	tf := &tfv1alpha1.Terraform{}
@@ -398,7 +411,18 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 	podType = currentStage.PodType
 	generation = currentStage.Generation
 
+	if tf.Spec.ExportRepo != nil && podType != tfv1alpha1.PodSetup {
+		err := r.exportRepo(ctx, tf, generation, reqLogger)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+	}
+
 	if podType == "" {
+		// podType is blank when the terraform workflow has completed for
+		// either create or delete. This updates the status as "completed" on
+		// the resource (or "deleted" which will be used to tell the controller
+		// to remove any finalizers).
 		if tf.Status.Phase == tfv1alpha1.PhaseRunning {
 			tf.Status.Phase = tfv1alpha1.PhaseCompleted
 			err := r.updateStatus(ctx, tf)
@@ -423,7 +447,7 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 		"metadata.generateName": fmt.Sprintf("%s-%s-", tf.Status.PodNamePrefix+"-v"+fmt.Sprint(generation), podType),
 	}
 	labels := map[string]string{
-		"tfGeneration": fmt.Sprintf("%d", generation),
+		"terraforms.tf.isaaguilar.com/generation": fmt.Sprintf("%d", generation),
 	}
 	matchingFields := client.MatchingFields(f)
 	matchingLabels := client.MatchingLabels(labels)
@@ -534,6 +558,9 @@ func (r *ReconcileTerraform) Reconcile(ctx context.Context, request reconcile.Re
 // }
 
 func addNewStage(tf *tfv1alpha1.Terraform, podType tfv1alpha1.PodType, reason string, interruptible tfv1alpha1.Interruptible, stageState tfv1alpha1.StageState) {
+	if reason == "GENERATION_CHANGE" {
+		tf.Status.Exported = tfv1alpha1.ExportedFalse
+	}
 	startTime := metav1.NewTime(time.Now())
 	stopTime := metav1.NewTime(time.Unix(0, 0))
 	if stageState == tfv1alpha1.StateComplete {
@@ -887,7 +914,10 @@ func formatJobSSHConfig(ctx context.Context, reqLogger logr.Logger, instance *tf
 
 func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1alpha1.Terraform) error {
 	reqLogger := r.Log.WithValues("Terraform", types.NamespacedName{Name: tf.Name, Namespace: tf.Namespace}.String())
+	var err error
 	n := len(tf.Status.Stages)
+	podType := tf.Status.Stages[n-1].PodType
+	generation := tf.Status.Stages[n-1].Generation
 	reason := tf.Status.Stages[n-1].Reason
 	isNewGeneration := reason == "GENERATION_CHANGE" || reason == "TF_RESOURCE_DELETED"
 	isFirstInstall := reason == "TF_RESOURCE_CREATED"
@@ -897,34 +927,21 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1alpha1.Ter
 	// needs to do before the CR can be deleted. Examples
 	// of finalizers include performing backups and deleting
 	// resources that are not owned by this CR, like a PVC.
+	scmMap := make(map[string]scmType)
+	for _, v := range tf.Spec.SCMAuthMethods {
+		if v.Git != nil {
+			scmMap[v.Host] = gitScmType
+		}
+	}
 
 	runOpts := newRunOptions(tf)
-	// runOpts.updateEnvVars(corev1.EnvVar{
-	// 	Name:  "DEPLOYMENT",
-	// 	Value: instance.Name,
-	// })
-	// runOpts.namespace = instance.Namespace
-
-	// Stack Download
-	address := tf.Spec.TerraformModule
-	stackRepoAccessOptions, err := newGitRepoAccessOptionsFromSpec(tf, address, []string{})
+	runOpts.stack, err = getParsedAddress(tf.Spec.TerraformModule, "", false, scmMap)
 	if err != nil {
-		r.Recorder.Event(tf, "Warning", "ProcessingError", fmt.Errorf("Error in newGitRepoAccessOptionsFromSpec: %v", err).Error())
-		return fmt.Errorf("Error in newGitRepoAccessOptionsFromSpec: %v", err)
+		return err
 	}
 
-	// Since we're not going to download this to a configmap, we need to
-	// pass the information to the pod to do it. We should be able to
-	// use stackRepoAccessOptions.parsedAddress and just send that to
-	// the pod's environment vars.
-	runOpts.stack = stackRepoAccessOptions.ParsedAddress
-	if runOpts.stack.Repo == "" {
-		return fmt.Errorf("Error is parsing terraformModule")
-	}
-
-	// TODO Update secrets only when the generation changes
 	if isChanged {
-		for _, m := range stackRepoAccessOptions.SCMAuthMethods {
+		for _, m := range tf.Spec.SCMAuthMethods {
 			// I think Terraform only allows for one git token. Add the first one
 			// to the job's env vars as GIT_PASSWORD.
 			if m.Git.HTTPS != nil {
@@ -952,32 +969,14 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1alpha1.Ter
 			}
 			break
 		}
-	}
 
-	scmMap := make(map[string]scmType)
-	for _, v := range tf.Spec.SCMAuthMethods {
-		if v.Git != nil {
-			scmMap[v.Host] = gitScmType
-		}
-	}
-	//
-	// TODO
-	//		The following section can have downloads from other sources. This
-	//		can take a few seconds to a few mintues to complete and will block
-	// 		the entire queue until it is completed.
-	//
-	//		Implement a way to run this in the background and signal that the
-	//		configmap is ready for usage which will then trigger the controller
-	//		to go ahead and configure the pods.
-	//
-	tfvars := ""
-	resourceDownloadItems := []ParsedAddress{}
-	if isChanged {
-
+		tfvars := ""
+		resourceDownloadItems := []ParsedAddress{}
 		// Configure the resourceDownloads in JSON that the setupRunner will
 		// use to download the resources into the main module directory
 
 		// ConfigMap Data only needs to be updated when generation changes
+
 		for _, s := range tf.Spec.ResourceDownloads {
 			address := strings.TrimSpace(s.Address)
 			parsedAddress, err := getParsedAddress(address, s.Path, s.UseAsVar, scmMap)
@@ -1106,31 +1105,31 @@ func (r *ReconcileTerraform) setupAndRun(ctx context.Context, tf *tfv1alpha1.Ter
 		}
 	}
 
-	// Flatten all the .tfvars and TF_VAR envs into a single file and push
-	if tf.Spec.ExportRepo != nil && isChanged {
+	// // Flatten all the .tfvars and TF_VAR envs into a single file and push
+	// if tf.Spec.ExportRepo != nil && isChanged {
 
-		// tfvars need to be downloaded for the first time now that it's been
-		// removed from the controller. Put this in the commitTfvars goroutine
-		// to make sure to unblock the controller. For now I'm just trying to
-		// get this to work so I'll levae these funky comments in and the code
-		// above is commented to conviennce.
+	// 	// tfvars need to be downloaded for the first time now that it's been
+	// 	// removed from the controller. Put this in the commitTfvars goroutine
+	// 	// to make sure to unblock the controller. For now I'm just trying to
+	// 	// get this to work so I'll levae these funky comments in and the code
+	// 	// above is commented to conviennce.
 
-		e := tf.Spec.ExportRepo
+	// 	e := tf.Spec.ExportRepo
 
-		address := e.Address
-		exportRepoAccessOptions, err := newGitRepoAccessOptionsFromSpec(tf, address, []string{})
-		if err != nil {
-			r.Recorder.Event(tf, "Warning", "ConfigError", fmt.Errorf("Error getting git repo access options: %v", err).Error())
-			return fmt.Errorf("Error in newGitRepoAccessOptionsFromSpec: %v", err)
-		}
+	// 	address := e.Address
+	// 	exportRepoAccessOptions, err := newGitRepoAccessOptionsFromSpec(tf, address, []string{})
+	// 	if err != nil {
+	// 		r.Recorder.Event(tf, "Warning", "ConfigError", fmt.Errorf("Error getting git repo access options: %v", err).Error())
+	// 		return fmt.Errorf("Error in newGitRepoAccessOptionsFromSpec: %v", err)
+	// 	}
 
-		// TODO decide what to do on errors
-		// Closing the tunnel from within this function
-		go exportRepoAccessOptions.commitTfvars(ctx, r.Client, tfvars, e.TFVarsFile, e.ConfFile, tf.Namespace, tf.Spec.CustomBackend, runOpts, reqLogger)
-	}
+	// 	// TODO decide what to do on errors
+	// 	// Closing the tunnel from within this function
+	// 	go exportRepoAccessOptions.commitTfvars(ctx, r.Client, tfvars, e.TFVarsFile, e.ConfFile, tf.Namespace, tf.Spec.CustomBackend, runOpts, reqLogger)
+	// }
 
 	// RUN
-	err = r.run(ctx, reqLogger, tf, runOpts)
+	err = r.run(ctx, reqLogger, tf, runOpts, isNewGeneration, isFirstInstall, podType, generation)
 	if err != nil {
 		return err
 	}
@@ -1417,12 +1416,8 @@ func (r ReconcileTerraform) createRoleBinding(ctx context.Context, tf *tfv1alpha
 	return nil
 }
 
-func (r ReconcileTerraform) createPod(ctx context.Context, tf *tfv1alpha1.Terraform, runOpts RunOptions) error {
+func (r ReconcileTerraform) createPod(ctx context.Context, tf *tfv1alpha1.Terraform, runOpts RunOptions, podType tfv1alpha1.PodType, generation int64) error {
 	kind := "Pod"
-
-	n := len(tf.Status.Stages)
-	podType := tf.Status.Stages[n-1].PodType
-	generation := tf.Status.Stages[n-1].Generation
 
 	tfRunnerPodTypes := []string{
 		string(tfv1alpha1.PodInit),
@@ -1843,11 +1838,17 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 	pod := &corev1.Pod{}
 	generateName := r.versionedName + "-" + string(podType) + "-"
 
+	generationPath := "/home/tfo-runner/generations/" + fmt.Sprint(generation)
+
 	envs := r.envVars
 	envs = append(envs, []corev1.EnvVar{
 		{
 			Name:  "TFO_RUNNER",
 			Value: r.versionedName,
+		},
+		{
+			Name:  "TFO_RESOURCE",
+			Value: r.tfName,
 		},
 		{
 			Name:  "TFO_NAMESPACE",
@@ -1858,14 +1859,18 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 			Value: fmt.Sprintf("%d", generation),
 		},
 		{
+			Name:  "TFO_GENERATION_PATH",
+			Value: generationPath,
+		},
+		{
 			Name:  "TFO_MAIN_MODULE",
-			Value: "/home/tfo-runner/generations/" + fmt.Sprint(generation) + "/main",
+			Value: generationPath + "/main",
 		},
 	}...)
 
 	volumes := []corev1.Volume{
 		{
-			Name: "tfrun",
+			Name: "tfohome",
 			VolumeSource: corev1.VolumeSource{
 				//
 				// TODO add an option to the tf to use host or pvc
@@ -1890,7 +1895,7 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 	}
 	volumeMounts := []corev1.VolumeMount{
 		{
-			Name:      "tfrun",
+			Name:      "tfohome",
 			MountPath: "/home/tfo-runner",
 			ReadOnly:  false,
 		},
@@ -2053,9 +2058,11 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 	terraformRunnerEnvs := make([]corev1.EnvVar, len(envs))
 	scriptRunnerEnvs := make([]corev1.EnvVar, len(envs))
 	setupRunnerEnvs := make([]corev1.EnvVar, len(envs))
+	exportRunnerEnvs := make([]corev1.EnvVar, len(envs))
 	copy(terraformRunnerEnvs, envs)
 	copy(scriptRunnerEnvs, envs)
 	copy(setupRunnerEnvs, envs)
+	copy(exportRunnerEnvs, envs)
 
 	executionScript := "tfo_runner.sh"
 	if r.terraformRunnerExecutionScriptConfigMap != nil {
@@ -2184,7 +2191,14 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 	}
 
 	labels := make(map[string]string)
-	labels["tfGeneration"] = fmt.Sprintf("%d", generation)
+	labels["terraforms.tf.isaaguilar.com/generation"] = fmt.Sprintf("%d", generation)
+	labels["terraforms.tf.isaaguilar.com/resourceName"] = r.tfName
+	labels["terraforms.tf.isaaguilar.com/podPrefix"] = r.name
+	labels["terraforms.tf.isaaguilar.com/terraformVersion"] = r.terraformVersion
+	labels["app.kubernetes.io/name"] = "terraform-operator"
+	labels["app.kubernetes.io/component"] = "terraform-operator-runner"
+	labels["app.kubernetes.io/instance"] = string(podType)
+	labels["app.kubernetes.io/created-by"] = "controller"
 
 	// Schedule a job that will execute the terraform plan
 	initContainers := []corev1.Container{}
@@ -2250,7 +2264,56 @@ func (r RunOptions) generatePod(podType, preScriptPodType tfv1alpha1.PodType, is
 				VolumeMounts:    volumeMounts,
 			})
 		}
-
+	} else if podType == tfv1alpha1.PodExport {
+		exportRef := r.exportOptions.stack.Hash
+		if exportRef == "" {
+			exportRef = "master"
+		}
+		exportRunnerEnvs = append(exportRunnerEnvs, []corev1.EnvVar{
+			{
+				Name:  "TFO_EXPORT_REPO_PATH",
+				Value: generationPath + "/export",
+			},
+			{
+				Name:  "TFO_EXPORT_REPO",
+				Value: r.exportOptions.stack.Repo,
+			},
+			{
+				Name:  "TFO_EXPORT_REPO_REF",
+				Value: exportRef,
+			},
+			{
+				Name:  "TFO_EXPORT_REPO_SUBDIR",
+				Value: exportRef,
+			},
+			{
+				Name:  "TFO_EXPORT_CONF_PATH",
+				Value: r.exportOptions.confPath,
+			},
+			{
+				Name:  "TFO_EXPORT_TFVARS_PATH",
+				Value: r.exportOptions.tfvarsPath,
+			},
+			{
+				Name:  "TFO_EXPORT_REPO_AUTOMATED_USER_NAME",
+				Value: r.exportOptions.gitUsername,
+			},
+			{
+				Name:  "TFO_EXPORT_REPO_AUTOMATED_USER_EMAIL",
+				Value: r.exportOptions.gitEmail,
+			},
+		}...)
+		containers = append(containers, corev1.Container{
+			SecurityContext: securityContext,
+			Name:            "export",
+			Image:           "docker.io/isaaguilar/export-runner" + ":" + "0.0.1", // CHANGE THIS TO EXPORT RUNNER, FOR NOW USE SOMETHING
+			ImagePullPolicy: corev1.PullAlways,
+			EnvFrom:         envFrom,
+			Env:             exportRunnerEnvs,
+			VolumeMounts:    volumeMounts,
+			// Command:         []string{"/bin/sleep"},
+			// Args:            []string{"3600"},
+		})
 	} else {
 		scriptRunnerEnvs = append(scriptRunnerEnvs, corev1.EnvVar{
 			Name:  "TFO_SCRIPT",
@@ -2303,12 +2366,12 @@ func (r *RunOptions) getOrCreateEnv(name, value string) {
 	})
 }
 
-func (r ReconcileTerraform) run(ctx context.Context, reqLogger logr.Logger, tf *tfv1alpha1.Terraform, runOpts RunOptions) (err error) {
+func (r ReconcileTerraform) run(ctx context.Context, reqLogger logr.Logger, tf *tfv1alpha1.Terraform, runOpts RunOptions, isNewGeneration, isFirstInstall bool, podType tfv1alpha1.PodType, generation int64) (err error) {
 
-	n := len(tf.Status.Stages)
-	reason := tf.Status.Stages[n-1].Reason
-	isNewGeneration := reason == "GENERATION_CHANGE" || reason == "TF_RESOURCE_DELETED"
-	isFirstInstall := reason == "TF_RESOURCE_CREATED"
+	// n := len(tf.Status.Stages)
+	// reason := tf.Status.Stages[n-1].Reason
+	// isNewGeneration := reason == "GENERATION_CHANGE" || reason == "TF_RESOURCE_DELETED"
+	// isFirstInstall := reason == "TF_RESOURCE_CREATED"
 
 	if isFirstInstall || isNewGeneration {
 		if err := r.createPVC(ctx, tf, runOpts); err != nil {
@@ -2391,75 +2454,9 @@ func (r ReconcileTerraform) run(ctx context.Context, reqLogger logr.Logger, tf *
 
 	}
 
-	if err := r.createPod(ctx, tf, runOpts); err != nil {
+	if err := r.createPod(ctx, tf, runOpts, podType, generation); err != nil {
 		return err
 	}
-
-	// generateName := id + "-" + string(podType) + "-"
-	// pod := runOpts.generatePod(podType, preScriptPodType, isTFRunner, id, generateName, generation)
-	// controllerutil.SetControllerReference(tf, pod, r.Scheme)
-
-	//
-	// TODO recreate resources for new inits podTypes
-	//
-	// createResources := false
-	// if podType == tfv1alpha1.PodInit || podType == tfv1alpha1.PodInitDelete {
-	// 	createResources = true
-	// }
-	// _ = createResources
-
-	// if serviceAccount != nil {
-	// 	controllerutil.SetControllerReference(tf, serviceAccount, r.Scheme)
-
-	// 	err = r.Client.Create(ctx, serviceAccount)
-	// 	if err != nil && errors.IsNotFound(err) {
-	// 		return "", err
-	// 	} else if err != nil {
-	// 		reqLogger.Info(err.Error())
-	// 	}
-	// }
-
-	// err = r.Client.Create(ctx, role)
-	// if err != nil && errors.IsNotFound(err) {
-	// 	return "", err
-	// } else if err != nil {
-	// 	reqLogger.Info(err.Error())
-	// }
-
-	// err = r.Client.Create(ctx, roleBinding)
-	// if err != nil && errors.IsNotFound(err) {
-	// 	return "", err
-	// } else if err != nil {
-	// 	reqLogger.Info(err.Error())
-	// }
-
-	// err = r.Client.Create(ctx, secret)
-	// if err != nil && errors.IsNotFound(err) {
-	// 	return "", err
-	// } else if err != nil {
-	// 	reqLogger.Info(fmt.Sprintf("Secret %s already exists", secret.Name))
-	// 	updateErr := r.Client.Update(ctx, secret)
-	// 	if updateErr != nil && errors.IsNotFound(updateErr) {
-	// 		return "", updateErr
-	// 	} else if updateErr != nil {
-	// 		reqLogger.Info(err.Error())
-	// 	}
-	// }
-
-	// err = r.Client.Create(ctx, job)
-	// if err != nil && errors.IsNotFound(err) {
-	// 	return "", err
-	// } else if err != nil {
-	// 	reqLogger.Info(err.Error())
-	// }
-	// return job.Name, nil
-
-	// err = r.Client.Create(ctx, pod)
-	// if err != nil && errors.IsNotFound(err) {
-	// 	return "", err
-	// } else if err != nil {
-	// 	reqLogger.Info(err.Error())
-	// }
 
 	return nil
 }
@@ -3600,4 +3597,164 @@ func (d GitRepoAccessOptions) commitTfvars(ctx context.Context, k8sclient client
 		return
 	}
 
+}
+
+func (r *ReconcileTerraform) exportRepo(ctx context.Context, tf *tfv1alpha1.Terraform, generation int64, reqLogger logr.Logger) error {
+	if tf.Status.Exported == tfv1alpha1.ExportedTrue {
+		return nil
+	}
+	var err error
+	var exportPodType tfv1alpha1.PodType = tfv1alpha1.PodExport
+
+	reqLogger.V(1).Info("Checking status initially")
+	// Updates from exported False to InProgress
+	if tf.Status.Exported == tfv1alpha1.ExportedFalse {
+		reqLogger.V(1).Info("Updating status to pending")
+		tf.Status.Exported = tfv1alpha1.ExportedPending
+		err := r.updateStatus(ctx, tf)
+		if err != nil {
+			reqLogger.V(1).Info(err.Error())
+
+			// return reconcile.Result{Requeue: true}, nil
+			// return
+			return err
+		}
+		// return reconcile.Result{}, nil
+		return nil
+	}
+
+	// GoRoutine:
+	//		> The podType is not "setup" and the exported status is "in-progress"
+	//			> Find "exported" pods
+	//			> Check for the len(exportedPods)
+	//			> len is 0
+	//				> trigger new pod
+	//				> RETURN
+	//			> len is > 0
+	//				> check completed status
+	//				> if succeeded
+	//					> remove pod && update status
+	reqLogger.V(1).Info("Finding Pods")
+	inNamespace := client.InNamespace(tf.Namespace)
+	f := fields.Set{
+		"metadata.generateName": fmt.Sprintf("%s-%s-", tf.Status.PodNamePrefix+"-v"+fmt.Sprint(generation), exportPodType),
+	}
+	labels := map[string]string{
+		"terraforms.tf.isaaguilar.com/generation": fmt.Sprintf("%d", generation),
+	}
+	matchingFields := client.MatchingFields(f)
+	matchingLabels := client.MatchingLabels(labels)
+	pods := &corev1.PodList{}
+	err = r.Client.List(ctx, pods, inNamespace, matchingFields, matchingLabels)
+	if err != nil {
+		reqLogger.Error(err, "")
+		// return reconcile.Result{}, nil
+		return err
+	}
+	reqLogger.V(1).Info(fmt.Sprintf("Found '%d' pods", len(pods.Items)))
+
+	if len(pods.Items) == 0 && tf.Status.Exported == tfv1alpha1.ExportedInProgress {
+		reqLogger.V(1).Info("No pods found. Removing the in-progress status")
+		// This case can happen if the pod is running and the user deletes it.
+		// Reset the phase to pending and then update the status which will
+		// force the resource to requeue.
+		reqLogger.V(1).Info("Updating status to pending")
+		tf.Status.Exported = tfv1alpha1.ExportedPending
+		err := r.updateStatus(ctx, tf)
+		if err != nil {
+			reqLogger.V(1).Info(err.Error())
+
+			// return reconcile.Result{Requeue: true}, nil
+			// return
+			return err
+		}
+		// return reconcile.Result{}, nil
+		return nil
+	}
+
+	if len(pods.Items) == 0 && tf.Status.Exported == tfv1alpha1.ExportedPending {
+		reqLogger.V(1).Info("No pods found. Creating the pod. Current Status is: " + string(tf.Status.Exported))
+		// reqLogger := r.Log.WithValues("Terraform", types.NamespacedName{Name: tf.Name, Namespace: tf.Namespace}.String())
+		var err error
+		n := len(tf.Status.Stages)
+		generation := tf.Status.Stages[n-1].Generation
+		scmMap := make(map[string]scmType)
+		for _, v := range tf.Spec.SCMAuthMethods {
+			if v.Git != nil {
+				scmMap[v.Host] = gitScmType
+			}
+		}
+
+		runOpts := newRunOptions(tf)
+		runOpts.stack, err = getParsedAddress(tf.Spec.TerraformModule, "", false, scmMap)
+		if err != nil {
+			r.Recorder.Event(tf, "Warning", "ConfigError", err.Error())
+			return err
+		}
+		runOpts.exportOptions.stack, err = getParsedAddress(tf.Spec.ExportRepo.Address, "", false, scmMap)
+		if err != nil {
+			r.Recorder.Event(tf, "Warning", "ConfigError", err.Error())
+			return err
+		}
+		runOpts.exportOptions.confPath = tf.Spec.ExportRepo.ConfFile
+		runOpts.exportOptions.tfvarsPath = tf.Spec.ExportRepo.TFVarsFile
+		runOpts.exportOptions.gitEmail = "terraform-operator@example.com"
+		runOpts.exportOptions.gitUsername = "Terraform Operator"
+
+		err = r.run(ctx, reqLogger, tf, runOpts, false, false, tfv1alpha1.PodExport, generation)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(pods.Items) > 0 {
+		reqLogger.V(1).Info("Pods are found. Current Status is: " + string(tf.Status.Exported))
+		if pods.Items[0].Status.Phase == corev1.PodFailed {
+			reqLogger.V(1).Info("Updating status to false")
+			tf.Status.Exported = tfv1alpha1.ExportedPending
+			err = r.updateStatus(ctx, tf)
+			if err != nil {
+				reqLogger.V(1).Info(err.Error())
+				// return reconcile.Result{}, err
+				return err
+			}
+			// return reconcile.Result{}, nil
+			return nil
+		}
+
+		if pods.Items[0].Status.Phase == corev1.PodSucceeded {
+			reqLogger.V(1).Info("Updating status to true")
+			tf.Status.Exported = tfv1alpha1.ExportedTrue
+			err = r.updateStatus(ctx, tf)
+			if err != nil {
+				reqLogger.V(1).Info(err.Error())
+				// return reconcile.Result{}, err
+				return err
+			}
+			if !tf.Spec.KeepCompletedPods {
+				err := r.Client.Delete(ctx, &pods.Items[0])
+				if err != nil {
+					reqLogger.V(1).Info(err.Error())
+				}
+			}
+			// return reconcile.Result{}, nil
+			return nil
+		}
+
+		if tf.Status.Exported != tfv1alpha1.ExportedInProgress {
+			reqLogger.V(1).Info("Updating status to in-progress")
+			tf.Status.Exported = tfv1alpha1.ExportedInProgress
+			err = r.updateStatus(ctx, tf)
+			if err != nil {
+				reqLogger.V(1).Info(err.Error())
+				// return reconcile.Result{}, err
+				return err
+			}
+			// return reconcile.Result{}, nil
+			return nil
+		}
+
+	}
+	reqLogger.V(1).Info("Reached end of export function")
+	return nil
 }

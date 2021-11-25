@@ -610,6 +610,8 @@ spec:
         status:
           description: TerraformStatus defines the observed state of Terraform
           properties:
+            exported:
+              type: string
             lastCompletedGeneration:
               format: int64
               type: integer
@@ -652,6 +654,7 @@ spec:
                 type: object
               type: array
           required:
+          - exported
           - lastCompletedGeneration
           - phase
           - podNamePrefix

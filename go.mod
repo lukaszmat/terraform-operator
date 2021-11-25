@@ -29,6 +29,7 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/rogpeppe/go-internal v1.4.0 // indirect
 	github.com/whilp/git-urls v0.0.0-20191001220047-6db9661140c0
+	go.uber.org/zap v1.15.0
 	golang.org/x/crypto v0.0.0-20201002170205-7f63de1d35b0
 	golang.org/x/net v0.0.0-20201110031124-69a78807bb2b
 	golang.org/x/tools v0.0.0-20201014231627-1610a49f37af // indirect

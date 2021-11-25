@@ -383,7 +383,18 @@ type TerraformStatus struct {
 	Phase                   StatusPhase `json:"phase"`
 	LastCompletedGeneration int64       `json:"lastCompletedGeneration"`
 	Stages                  []Stage     `json:"stages"`
+	Exported                Exported    `json:"exported"`
 }
+
+type Exported string
+
+const (
+	ExportedTrue       Exported = "true"
+	ExportedFalse      Exported = "false"
+	ExportedInProgress Exported = "in-progress"
+	ExportedFailed     Exported = "failed"
+	ExportedPending    Exported = "pending"
+)
 
 type Stage struct {
 	Generation int64      `json:"generation"`
@@ -434,6 +445,8 @@ const (
 	PodApply     PodType = "apply"
 	PodPostApply PodType = "post"
 	PodNil       PodType = ""
+
+	PodExport PodType = "export"
 )
 
 type StageState string
